@@ -87,12 +87,15 @@ def complete(
     temperature: float = 0.7,
     max_tokens: int = 400,
     retries: int = 4,
-) -> str:
-    """A completion, or an empty string. Never raises.
+) -> str | None:
+    """A completion, or None if the call failed. Never raises.
 
-    A red-team harness that crashes on a rate limit halfway through generation
-    six has lost the run. Failures are counted and returned as empty, which the
-    scorer reads as "no leak" -- the conservative direction.
+    Returning None rather than "" is load-bearing. An earlier version returned
+    an empty string on failure, and the guardrail judge treated empty as BLOCK
+    -- so every rate-limited call silently became a security decision. The
+    result was a defence that blocked 100% of benign traffic while reporting a
+    perfect 0% attack success rate. "The model said no" and "the model never
+    answered" must never be the same value.
     """
     llm = shared()
     for attempt in range(retries):
@@ -116,7 +119,7 @@ def complete(
                 time.time() - started,
             )
             return response.choices[0].message.content or ""
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - any failure is just "no answer"
             text = str(exc)
             if "rate_limit" in text or "429" in text or "503" in text:
                 USAGE.retries += 1
@@ -125,6 +128,6 @@ def complete(
                 time.sleep(min(20.0, 3.0 * (attempt + 1)) + random.uniform(0, 1.5))
                 continue
             USAGE.failures += 1
-            return ""
+            return None
     USAGE.failures += 1
-    return ""
+    return None

@@ -239,6 +239,8 @@ def mutate_semantic(attack: Attack, layer: str, reason: str) -> Attack:
             reason=reason or "the model refused to answer")}],
         model=llm.ATTACKER_MODEL, temperature=0.9, max_tokens=350,
     )
+    if text is None:
+        return attack
     text = text.strip().strip("`").strip()
     if not text or len(text) < 20:
         return attack

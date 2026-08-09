@@ -37,9 +37,9 @@ def summarise(result) -> dict:
         by_strategy[root]["n"] += 1
         by_strategy[root]["leaked"] += t.leaked
         by_strategy[root]["blocked"] += t.blocked
-        by_generation[t.generation]["n"] += 1
-        by_generation[t.generation]["leaked"] += t.leaked
-        by_generation[t.generation]["blocked"] += t.blocked
+        by_generation[t.round]["n"] += 1
+        by_generation[t.round]["leaked"] += t.leaked
+        by_generation[t.round]["blocked"] += t.blocked
         by_owasp[t.owasp]["n"] += 1
         by_owasp[t.owasp]["leaked"] += t.leaked
         if t.blocked:
@@ -179,7 +179,7 @@ def build(result, summary: dict, fp: dict, baseline: dict | None = None,
 
     successes = "".join(
         f"<details><summary>{html.escape(t.strategy)} "
-        f"<span class='tag'>gen {t.generation}</span>"
+        f"<span class='tag'>round {t.round}</span>"
         f"<span class='tag'>{html.escape(t.owasp)}</span>"
         + "".join(f"<span class='tag'>{html.escape(o)}</span>" for o in t.operators)
         + f"</summary><pre>{html.escape(redact(t.prompt))}</pre>"
@@ -222,11 +222,11 @@ appears in the response, in any encoding.</p>
 
 <div class="cards">{card_html}</div>
 
-<h2>Attack success by generation</h2>
+<h2>Attack success by GA round</h2>
 <p class="note">If this line does not rise, the genetic algorithm is not doing anything
 a random prompt generator could not.</p>
 {_sparkline(gen_asr)}
-<table><tr><th>Generation</th><th class="num">Trials</th><th class="num">Leaks</th>
+<table><tr><th>Round</th><th class="num">Trials</th><th class="num">Leaks</th>
 <th>Attack success rate</th></tr>
 {"".join(f"<tr><td>{g}</td><td class='num'>{summary['by_generation'][g]['n']}</td>"
          f"<td class='num'>{summary['by_generation'][g]['leaked']}</td>"

@@ -1,10 +1,15 @@
 """Layered input guardrails, cheapest first.
 
-Three layers, escalating in cost:
+Four layers, escalating in cost:
 
     1. heuristics   0 tokens,  ~0 ms      regex over known injection shapes
-    2. prompt-guard ~30 tokens, ~200 ms   Llama Prompt Guard 2, returns P(attack)
-    3. safeguard    ~300 tokens, ~1 s     GPT-OSS Safeguard as a policy judge
+    2. semantic     0 tokens,  ~5 ms      local PyTorch MiniLM, cosine to attack corpus
+    3. prompt-guard ~30 tokens, ~200 ms   Llama Prompt Guard 2, returns P(attack)
+    4. safeguard   ~300 tokens, ~1 s      GPT-OSS Safeguard as a policy judge
+
+The semantic layer sits second because it costs nothing per call and runs
+locally: regex catches literal strings, embeddings catch paraphrases, and only
+what survives both is worth spending an API call on.
 
 Ordering is the entire point of a layered defence and it is a real engineering
 decision, not decoration: layer 1 disposes of the obvious for free, so layer 3
@@ -22,7 +27,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import llm
+from . import llm, semantic
 
 # Layer 2 operating point. Prompt Guard returns a probability, not a label, so
 # this is a tunable knob -- `run.py sweep` measures block rate against benign
@@ -64,7 +69,12 @@ class Verdict:
     layer: str | None
     reason: str
     guard_score: float | None = None
+    semantic_score: float | None = None
     layers_run: list = field(default_factory=list)
+    # Layers that ran but could not return a decision (rate limit, timeout,
+    # off-vocabulary answer). Tracked so a degraded run is visible rather than
+    # being silently scored as either safe or unsafe.
+    degraded: list = field(default_factory=list)
 
     @property
     def cost_layers(self) -> int:
@@ -79,36 +89,53 @@ def heuristics(prompt: str) -> tuple:
     return False, ""
 
 
-def guard_score(prompt: str) -> float:
-    """P(injection) from Llama Prompt Guard 2. Returns 0.0 if the call fails."""
+def guard_score(prompt: str) -> float | None:
+    """P(injection) from Llama Prompt Guard 2. None if the call failed."""
     raw = llm.complete(
         [{"role": "user", "content": prompt}],
         model=llm.GUARD_MODEL, temperature=0.0, max_tokens=12,
     )
+    if raw is None:
+        return None
     try:
         return float(raw.strip())
     except (ValueError, AttributeError):
-        return 0.0
+        return None
 
 
-def safeguard(prompt: str) -> bool:
-    """True if the policy judge says BLOCK."""
+# GPT-OSS Safeguard is a reasoning model: it spends tokens thinking before it
+# emits content. At max_tokens=8 the budget is gone before the verdict, every
+# response comes back empty, and a naive "empty means block" rule turns the
+# whole layer into a deny-all. 256 is ample for reasoning plus one word.
+JUDGE_MAX_TOKENS = 256
+
+
+def safeguard(prompt: str) -> bool | None:
+    """True if the policy judge says BLOCK, False for ALLOW, None if unavailable."""
     raw = llm.complete(
         [{"role": "system", "content": SAFEGUARD_POLICY},
          {"role": "user", "content": prompt}],
-        model=llm.JUDGE_MODEL, temperature=0.0, max_tokens=8,
+        model=llm.JUDGE_MODEL, temperature=0.0, max_tokens=JUDGE_MAX_TOKENS,
     )
-    # An empty response means the judge refused to engage, which for a safety
-    # model is itself a signal that the input was hostile.
-    return "BLOCK" in raw.upper() or raw.strip() == ""
+    if raw is None:
+        return None
+    verdict = raw.strip().upper()
+    if "BLOCK" in verdict:
+        return True
+    if "ALLOW" in verdict:
+        return False
+    # Answered, but not in the requested vocabulary. Not a decision.
+    return None
 
 
 def screen(
     prompt: str,
     use_heuristics: bool = True,
+    use_semantic: bool = True,
     use_guard: bool = True,
     use_safeguard: bool = True,
     threshold: float = GUARD_THRESHOLD,
+    semantic_threshold: float = semantic.SEMANTIC_THRESHOLD,
 ) -> Verdict:
     """Run the enabled layers in cost order, stopping at the first block."""
     ran = []
@@ -119,21 +146,40 @@ def screen(
         if hit:
             return Verdict(True, "heuristics", name, layers_run=ran)
 
-    score = None
+    semantic_score = None
+    if use_semantic:
+        ran.append("semantic")
+        semantic_score = semantic.similarity(prompt)
+        if semantic_score is not None and semantic_score >= semantic_threshold:
+            return Verdict(True, "semantic", f"cosine={semantic_score:.3f}",
+                           semantic_score=semantic_score, layers_run=ran)
+
+    score, degraded = None, []
     if use_guard:
         ran.append("prompt-guard")
         score = guard_score(prompt)
-        if score >= threshold:
+        if score is None:
+            degraded.append("prompt-guard")
+        elif score >= threshold:
             return Verdict(True, "prompt-guard", f"P(attack)={score:.3f}",
                            guard_score=score, layers_run=ran)
 
     if use_safeguard:
         ran.append("safeguard")
-        if safeguard(prompt):
+        judgement = safeguard(prompt)
+        if judgement is None:
+            degraded.append("safeguard")
+        elif judgement:
             return Verdict(True, "safeguard", "policy judge returned BLOCK",
                            guard_score=score, layers_run=ran)
 
-    return Verdict(False, None, "passed all layers", guard_score=score, layers_run=ran)
+    # A layer that could not answer is recorded as unavailable, never as a
+    # block. A production stack would fail closed here; a measurement harness
+    # that did so would report its own outages as perfect security.
+    reason = ("passed all layers" if not degraded
+              else f"passed; unavailable: {', '.join(degraded)}")
+    return Verdict(False, None, reason, guard_score=score, layers_run=ran,
+                   degraded=degraded, semantic_score=semantic_score)
 
 
 # Benign IT-support prompts. A guardrail that blocks these is not a guardrail,

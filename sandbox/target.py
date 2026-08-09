@@ -36,6 +36,7 @@ class Response:
     text: str
     leaked: bool
     refused: bool
+    errored: bool = False
 
 
 _REFUSAL = re.compile(
@@ -92,4 +93,7 @@ def ask(prompt: str, model: str = llm.TARGET_MODEL, temperature: float = 0.6) ->
         [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
         model=model, temperature=temperature,
     )
+    # A failed call is not a refusal and not a leak -- it is no evidence.
+    if text is None:
+        return Response(text="", leaked=False, refused=False, errored=True)
     return Response(text=text, leaked=leaked(text), refused=refused(text))

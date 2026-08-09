@@ -49,6 +49,12 @@ class Trial:
     leaked: bool
     response: str
     fitness: float
+    errored: bool = False
+    degraded: list = field(default_factory=list)
+    # The GA round this trial ran in. Distinct from `generation`, which is
+    # lineage depth and diverges once crossover merges two lineages -- so
+    # grouping the evolution curve by `generation` does not show rounds.
+    round: int = 0
 
 
 @dataclass
@@ -79,6 +85,7 @@ def evaluate(attack: A.Attack, config: dict) -> Trial:
             blocked=True, blocked_by=verdict.layer, block_reason=verdict.reason,
             guard_score=verdict.guard_score, layers_run=verdict.layers_run,
             refused=False, leaked=False, response="", fitness=FITNESS_BLOCKED,
+            degraded=verdict.degraded,
         )
 
     response = target.ask(attack.prompt)
@@ -94,6 +101,7 @@ def evaluate(attack: A.Attack, config: dict) -> Trial:
         blocked=False, blocked_by=None, block_reason="", guard_score=verdict.guard_score,
         layers_run=verdict.layers_run, refused=response.refused, leaked=response.leaked,
         response=response.text[:600], fitness=fitness,
+        errored=response.errored, degraded=verdict.degraded,
     )
 
 
@@ -145,6 +153,7 @@ def run(
         scored = []
         for attack in population:
             trial = evaluate(attack, config)
+            trial.round = gen
             result.trials.append(trial)
             scored.append((attack, trial))
 
@@ -165,15 +174,20 @@ def run(
 def measure_false_positives(config: dict, prompts=None) -> dict:
     """How much ordinary traffic this configuration destroys."""
     prompts = prompts or defenses.BENIGN_PROMPTS
-    blocked = []
+    blocked, degraded = [], 0
     for p in prompts:
         verdict = defenses.screen(p, **config)
+        if verdict.degraded:
+            degraded += 1
         if verdict.blocked:
             blocked.append({"prompt": p, "layer": verdict.layer, "reason": verdict.reason})
     return {
         "n": len(prompts),
         "blocked": len(blocked),
         "false_positive_rate": len(blocked) / len(prompts) if prompts else 0.0,
+        # Prompts where a layer could not answer. A high number means the
+        # false-positive rate below was measured against a degraded stack.
+        "degraded": degraded,
         "examples": blocked[:5],
     }
 
