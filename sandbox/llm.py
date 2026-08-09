@@ -12,6 +12,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from openai import OpenAI
 
@@ -62,23 +63,19 @@ _last_call = [0.0]
 MIN_GAP = 0.35  # seconds between any two requests
 
 
+@lru_cache(maxsize=1)
 def client() -> OpenAI:
-    """Groq by default; point OPENAI_BASE_URL at Ollama to run this offline."""
+    """Groq by default; point OPENAI_BASE_URL at Ollama to run this offline.
+
+    Cached so every call site shares one connection pool. `lru_cache` is the
+    stdlib's singleton; a module-level global plus a None check is the same
+    thing written by hand.
+    """
     return OpenAI(
         base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
         api_key=os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or "ollama",
         timeout=60.0,
     )
-
-
-_shared = None
-
-
-def shared() -> OpenAI:
-    global _shared
-    if _shared is None:
-        _shared = client()
-    return _shared
 
 
 def complete(
@@ -97,7 +94,7 @@ def complete(
     perfect 0% attack success rate. "The model said no" and "the model never
     answered" must never be the same value.
     """
-    llm = shared()
+    llm = client()
     for attempt in range(retries):
         with _lock:
             gap = MIN_GAP - (time.time() - _last_call[0])
