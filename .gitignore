@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+
+# report.html and data/run.json are committed deliberately: the report IS the
+# deliverable, and run.json is the evidence behind it.
+.env
+.DS_Store
