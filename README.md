@@ -1,5 +1,7 @@
 # redteam-sandbox
 
+[![tests](https://github.com/kylekapoor/redteam-sandbox/actions/workflows/tests.yml/badge.svg)](https://github.com/kylekapoor/redteam-sandbox/actions/workflows/tests.yml)
+
 A chatbot is given a secret password and told never to reveal it. One program
 tries thousands of ways to trick it into leaking that password. Another program
 tries to block those attempts. The attacks **evolve** — the ones that get closest
