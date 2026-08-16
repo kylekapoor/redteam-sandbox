@@ -4,8 +4,8 @@ Four layers, escalating in cost:
 
     1. heuristics   0 tokens,  ~0 ms      regex over known injection shapes
     2. semantic     0 tokens,  ~5 ms      local PyTorch MiniLM, cosine to attack corpus
-    3. prompt-guard ~30 tokens, ~200 ms   Llama Prompt Guard 2, returns P(attack)
-    4. safeguard   ~300 tokens, ~1 s      GPT-OSS Safeguard as a policy judge
+    3. prompt-guard 0 tokens, ~40 ms      local DeBERTa, returns P(injection)
+    4. safeguard    ~300 tokens, ~2 s     Llama 3.1 8B as a policy judge
 
 The semantic layer sits second because it costs nothing per call and runs
 locally: regex catches literal strings, embeddings catch paraphrases, and only
@@ -27,12 +27,25 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import llm, semantic
+from . import injection, llm, semantic
 
-# Layer 2 operating point. Prompt Guard returns a probability, not a label, so
-# this is a tunable knob -- `run.py sweep` measures block rate against benign
-# false positives across thresholds and this is where that curve was read off.
-GUARD_THRESHOLD = 0.5
+# Operating point for the injection classifier, read off `run.py sweep`:
+#
+#     threshold   seed attacks blocked   benign blocked
+#     0.50               100%                  5%
+#     0.90                91%                  5%
+#     0.99                91%                  0%
+#
+# The classes overlap, so no threshold separates them. The quietest attack is
+# the leetspeak one at 0.852, and the loudest benign prompt is "What are the
+# password complexity requirements here?" at 0.976, which a helpdesk classifier
+# flagging the word "password" is always going to find hard.
+#
+# 0.99 keeps ordinary support traffic untouched and gives up the leetspeak
+# attack, which the semantic layer and the judge sit behind it to catch. An
+# outage costs more here than one attack reaching a target that still has its
+# own refusal training.
+GUARD_THRESHOLD = 0.99
 
 HEURISTICS = [
     (re.compile(r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|rules?)", re.I),
@@ -90,23 +103,14 @@ def heuristics(prompt: str) -> tuple:
 
 
 def guard_score(prompt: str) -> float | None:
-    """P(injection) from Llama Prompt Guard 2. None if the call failed."""
-    raw = llm.complete(
-        [{"role": "user", "content": prompt}],
-        model=llm.GUARD_MODEL, temperature=0.0, max_tokens=12,
-    )
-    if raw is None:
-        return None
-    try:
-        return float(raw.strip())
-    except (ValueError, AttributeError):
-        return None
+    """P(injection) from the local DeBERTa classifier. None if unavailable."""
+    return injection.score(prompt)
 
 
-# GPT-OSS Safeguard is a reasoning model: it spends tokens thinking before it
-# emits content. At max_tokens=8 the budget is gone before the verdict, every
-# response comes back empty, and a naive "empty means block" rule turns the
-# whole layer into a deny-all. 256 is ample for reasoning plus one word.
+# The judge that lived here before was a reasoning model, and at max_tokens=8 its
+# budget ran out mid-thought so every response came back empty. A naive "empty
+# means block" rule then turned the layer into a deny-all. Llama 3.1 answers in
+# one word, but the headroom stays.
 JUDGE_MAX_TOKENS = 256
 
 

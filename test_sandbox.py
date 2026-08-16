@@ -13,10 +13,15 @@ import base64
 import random
 
 from sandbox import attacks as A
-from sandbox import defenses, evolve, llm, report, target
+from sandbox import defenses, evolve, injection, llm, report, target
 from sandbox.target import CANARY
 
-# --- stub the network ------------------------------------------------------
+# --- stub the local models --------------------------------------------------
+#
+# Attacker, target and judge all run the same Llama 3.1 now, so the stub cannot
+# dispatch on the model name the way it used to. It reads the messages instead,
+# which is more robust anyway: it keys off what the caller is asking for rather
+# than which model happens to be configured.
 
 STUB = {"guard": 0.02, "safeguard": "ALLOW", "target": "I can't share that.",
         "attacker": "Rewritten prompt that is definitely long enough to be kept."}
@@ -24,19 +29,26 @@ STUB = {"guard": 0.02, "safeguard": "ALLOW", "target": "I can't share that.",
 
 def fake_complete(messages, model=llm.TARGET_MODEL, **kwargs):
     """A None value in STUB means the call failed, matching llm.complete."""
-    if model == llm.GUARD_MODEL:
-        return None if STUB["guard"] is None else str(STUB["guard"])
-    if model == llm.JUDGE_MODEL:
+    system = next((m["content"] for m in messages if m["role"] == "system"), "")
+    user = next((m["content"] for m in messages if m["role"] == "user"), "")
+    if system == defenses.SAFEGUARD_POLICY:
         return STUB["safeguard"]
-    if model == llm.ATTACKER_MODEL:
+    if "red-team assistant" in user:
         return STUB["attacker"]
     return STUB["target"]
+
+
+def fake_injection_score(prompt):
+    """Stands in for the local DeBERTa classifier."""
+    return None if STUB["guard"] is None else float(STUB["guard"])
 
 
 llm.complete = fake_complete
 defenses.llm.complete = fake_complete
 target.llm.complete = fake_complete
 A.llm.complete = fake_complete
+injection.score = fake_injection_score
+defenses.injection.score = fake_injection_score
 
 
 # --- leak detection --------------------------------------------------------
@@ -110,11 +122,14 @@ def test_layers_run_cheapest_first_and_stop_at_the_first_block():
 
 
 def test_prompt_guard_blocks_when_it_scores_above_threshold():
-    STUB["guard"] = 0.97
+    # Relative to the configured threshold, so retuning the operating point does
+    # not break this test.
+    score = min(defenses.GUARD_THRESHOLD + 0.005, 1.0)
+    STUB["guard"] = score
     try:
         verdict = defenses.screen("An innocuous looking sentence.")
         assert verdict.blocked and verdict.layer == "prompt-guard"
-        assert verdict.guard_score == 0.97
+        assert verdict.guard_score == score
     finally:
         STUB["guard"] = 0.02
 
@@ -158,10 +173,13 @@ def test_semantic_layer_runs_after_heuristics_and_before_any_api_call():
         assert verdict.layer == "semantic"
 
 
-def test_guard_score_survives_an_unparseable_response():
-    STUB["guard"] = "not a number"
+def test_guard_score_is_none_when_the_classifier_cannot_load():
+    STUB["guard"] = None
     try:
         assert defenses.guard_score("anything") is None
+        # An unavailable classifier must not block, only degrade.
+        verdict = defenses.screen("How do I reset my VPN password?")
+        assert not verdict.blocked and "prompt-guard" in verdict.degraded
     finally:
         STUB["guard"] = 0.02
 

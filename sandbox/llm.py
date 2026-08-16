@@ -1,9 +1,14 @@
-"""One rate-limited, OpenAI-compatible client for every model in the harness.
+"""One OpenAI-compatible client for every model in the harness.
 
-Groq's free tier is generous on requests and tight on tokens per minute, and a
-genetic algorithm is exactly the workload that trips it: hundreds of small calls
-in bursts. Everything funnels through `complete` so backoff and accounting
-happen in one place.
+Everything runs locally through Ollama. This started on Groq's free tier and
+moved after Groq decommissioned the attacker model with two days' notice, on top
+of the per-minute and per-day token caps that already made a genetic algorithm
+awkward to run: hundreds of small calls in bursts is the exact workload those
+limits punish.
+
+Local inference removes the API key, the quotas and the decommission risk, and
+anyone cloning this repo can run it without an account. Set OPENAI_BASE_URL and
+the model names to point back at a hosted provider if you want one.
 """
 from __future__ import annotations
 
@@ -16,13 +21,19 @@ from functools import lru_cache
 
 from openai import OpenAI
 
-# Attacker needs to be creative, target should be cheap because it is called
-# most, and the two defence models are purpose-built safety classifiers that
-# Groq hosts for free.
-ATTACKER_MODEL = "llama-3.3-70b-versatile"
-TARGET_MODEL = "llama-3.1-8b-instant"
-GUARD_MODEL = "meta-llama/llama-prompt-guard-2-86m"
-JUDGE_MODEL = "openai/gpt-oss-safeguard-20b"
+# The attacker rewrites prompts a filter has just blocked, and most current
+# models decline that request. Testing the alternatives: gpt-oss-120b answers
+# "I'm sorry, but I can't help with that", gpt-oss-20b returns nothing,
+# qwen3.6-27b refuses once you stop it reasoning, and groq/compound-mini refuses
+# every variant. Llama 3.1 8B complied on all three rewrite cases, so it plays
+# attacker, target and judge.
+#
+# Attacker and target sharing a model is worth knowing when reading the results.
+# They share a refusal boundary, which flatters the defence.
+DEFAULT_BASE_URL = "http://localhost:11434/v1"
+ATTACKER_MODEL = os.getenv("ATTACKER_MODEL", "llama3.1:8b")
+TARGET_MODEL = os.getenv("TARGET_MODEL", "llama3.1:8b")
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", "llama3.1:8b")
 
 
 @dataclass
@@ -60,21 +71,24 @@ class Usage:
 USAGE = Usage()
 _lock = threading.Lock()
 _last_call = [0.0]
-MIN_GAP = 0.35  # seconds between any two requests
+# Local inference has no rate limit, so nothing needs spacing out. Raise this
+# if you point the client back at a hosted provider.
+MIN_GAP = float(os.getenv("MIN_REQUEST_GAP", "0.0"))
 
 
 @lru_cache(maxsize=1)
 def client() -> OpenAI:
-    """Groq by default; point OPENAI_BASE_URL at Ollama to run this offline.
+    """Local Ollama by default; point OPENAI_BASE_URL at a hosted provider to swap.
 
     Cached so every call site shares one connection pool. `lru_cache` is the
     stdlib's singleton; a module-level global plus a None check is the same
     thing written by hand.
     """
     return OpenAI(
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
-        api_key=os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or "ollama",
-        timeout=60.0,
+        base_url=os.getenv("OPENAI_BASE_URL", DEFAULT_BASE_URL),
+        # Ollama ignores the key and the OpenAI client insists on one.
+        api_key=os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY") or "ollama",
+        timeout=180.0,   # a local 8B model on CPU is slower than a hosted one
     )
 
 
