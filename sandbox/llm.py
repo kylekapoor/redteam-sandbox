@@ -25,13 +25,16 @@ from openai import OpenAI
 # models decline that request. Testing the alternatives: gpt-oss-120b answers
 # "I'm sorry, but I can't help with that", gpt-oss-20b returns nothing,
 # qwen3.6-27b refuses once you stop it reasoning, and groq/compound-mini refuses
-# every variant. Llama 3.1 8B complied on all three rewrite cases, so it plays
-# attacker, target and judge.
+# every variant. Mistral 7B and Llama 3.1 8B both complied on all three rewrite
+# cases.
 #
-# Attacker and target sharing a model is worth knowing when reading the results.
-# They share a refusal boundary, which flatters the defence.
+# The attacker is deliberately a different family from the target. When both
+# were Llama 3.1 they shared a refusal boundary, so an attack the attacker would
+# not write was also one the target would not answer, and the defence looked
+# better than it was. Mistral has its own boundary, which makes the attack
+# surface wider and the block rates honest.
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
-ATTACKER_MODEL = os.getenv("ATTACKER_MODEL", "llama3.1:8b")
+ATTACKER_MODEL = os.getenv("ATTACKER_MODEL", "mistral:7b")
 TARGET_MODEL = os.getenv("TARGET_MODEL", "llama3.1:8b")
 JUDGE_MODEL = os.getenv("JUDGE_MODEL", "llama3.1:8b")
 
